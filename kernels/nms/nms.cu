@@ -12,6 +12,7 @@
 #define INT4(value) (reinterpret_cast<int4 *>(&(value))[0])
 #define FLOAT4(value) (reinterpret_cast<float4 *>(&(value))[0])
 
+//保留的框在keep标记为1，抑制的框标记为0
 __global__ void nms_kernel(const float *boxes, const float *scores, int *keep,
                            int num_boxes, float iou_threshold) {
   const int threadsPerBlock = blockDim.x;

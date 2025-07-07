@@ -18,6 +18,23 @@ inline __device__ void from_float(__nv_bfloat16 &d, float s) {
 
 // Implements section 2.2 of https://www.arxiv.org/pdf/2501.01005
 // can be used to combine partial attention results (in the split-KV case)
+/*************** 
+ * @param 
+ * output 合并后的注意力输出结果指针
+ * output_lse 合并后的LogSumExp(LSE)值的指针，LSE在注意力机制中用于数值稳定
+ * prefix_output 指向第一部分(前缀)
+ * prefix_lse 指向第一部分的输出对应的LSE指针
+ * suffix_output 指向第二部分(后缀)
+ * suffix_lse 指向第二部分注意力输出的LSE指针
+ * num_tokens 序列中token数量
+ * num_heads 注意力头的数量
+ * head_size 每个注意力头的大小(维度)
+ * 对于每个token，注意力头head都会计算当前token和其他token的注意力权重
+ * 进而生成一个输出向量，head_size就是输出向量的维度
+ * 对于num_heads(多个头)，会一起决定整个注意力层的总维度（num_heads * head_size = 隐藏层维度）
+ * 
+ * 这里的切分是将KV序列分为前缀和后缀两个部分，每个部分单独计算注意力，然后将这些注意力结果合并
+ * ****************/
 template <typename scalar_t, const uint NUM_THREADS>
 __global__ void
 merge_attn_states_kernel(scalar_t *output, float *output_lse,
@@ -26,20 +43,26 @@ merge_attn_states_kernel(scalar_t *output, float *output_lse,
                          const uint num_tokens, const uint num_heads,
                          const uint head_size) {
   using pack_128b_t = uint4;
-  const uint pack_size = 16 / sizeof(scalar_t);
-  const uint threads_per_head = head_size / pack_size;
+  const uint pack_size = 16 / sizeof(scalar_t); //128（16 * 8）位数据包 包含的元素数量，例如half = 2, 16 /2 = 8
+  // 也就是每个head需要多少线程
+  const uint threads_per_head = head_size / pack_size; //每个注意力头的数据被划分为多少个128位的数据包
 
   const uint global_idx = blockIdx.x * NUM_THREADS + threadIdx.x;
+  // 总共需要的线程数
   const uint token_head_threads = num_tokens * num_heads * threads_per_head;
 
   if (global_idx >= token_head_threads)
     return;
 
   // global_idx -> token_idx + head_idx + pack_idx
+  // 当前线程处理的是哪个token的哪个注意力头
   const uint token_head_idx = global_idx / threads_per_head;
+  // 当前线程处理的是这个注意力头的第几个128位数据包
   const uint pack_idx = global_idx % threads_per_head;
 
+  // 当前线程处理的是哪个token
   const uint token_idx = token_head_idx / num_heads;
+  // 当前线程处理的注意力头索引
   const uint head_idx = token_head_idx % num_heads;
 
   const uint pack_offset = pack_idx * pack_size; // (0~15)*8, etc.
@@ -80,6 +103,8 @@ merge_attn_states_kernel(scalar_t *output, float *output_lse,
       const float s_out_f =
           to_float(reinterpret_cast<const scalar_t *>(&s_out_pack)[i]);
       // fma: a * b + c = p_out_f * p_scale + (s_out_f * s_scale)
+
+      // result = (a * b) + c FMA(Fused Multiply-Add)语义, 将单独的乘法 + 加法优化为一条指令，并且精度更高
       const float o_out_f = p_out_f * p_scale + (s_out_f * s_scale);
       // float -> half(uint16_t), bfloat16, float.
       from_float(reinterpret_cast<scalar_t *>(&o_out_pack)[i], o_out_f);

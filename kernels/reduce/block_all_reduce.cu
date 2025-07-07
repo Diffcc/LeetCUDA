@@ -48,6 +48,7 @@ __global__ void block_all_reduce_sum_f32_f32_kernel(float *a, float *y, int N) {
     reduce_smem[warp] = sum;
   __syncthreads(); // make sure the data is in shared memory.
   // the first warp compute the final sum.
+  // 第一个warp进行所有的warp的最终规约，需要先从之前的warp中取出每个warp规约的sum
   sum = (lane < NUM_WARPS) ? reduce_smem[lane] : 0.0f;
   if (warp == 0)
     sum = warp_reduce_sum_f32<NUM_WARPS>(sum);
